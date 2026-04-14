@@ -1,6 +1,6 @@
-# 🛍️ Sistema Automatizado de Compilacao e Testes do MPAS-JEDI no Cluster Egeon
+# 🛍️ Sistema Automatizado de Compilacao e Testes do MPAS-JEDI
 
-Este repositório contém uma estrutura padronizada e automatizada para compilar e testar o sistema **MPAS-JEDI** no cluster **Egeon**, utilizando o Spack-Stack 1.7.0 e o SLURM como sistema de filas.
+Este repositório contém uma estrutura padronizada e automatizada para compilar e testar o sistema **MPAS-JEDI** nas maquinas o **INPE**, utilizando o Spack-Stack 1.7.0 e o SLURM como sistema de filas.
 
 ---
 
