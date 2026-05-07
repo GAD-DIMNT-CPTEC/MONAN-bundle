@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+###############################################################################
+# jobs/ctest_job.pbs
+#
+# PBS ctest job body for MONAN-bundle/MPAS-bundle.
+###############################################################################
+
+set -Eeuo pipefail
+
+log() { printf '[%s] [INFO] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$*"; }
+die() { printf '[%s] [ERROR] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$*" >&2; exit 1; }
+trap 'log "Unexpected error at line $LINENO"; exit 2' ERR
+
+BUILD_DIR="${1:?BUILD_DIR missing}"
+SPACK_DIR="${2:?SPACK_DIR missing}"
+SPACK_ACTIVATE_SCRIPT="${3:?SPACK_ACTIVATE_SCRIPT missing}"
+set --
+
+[[ -d "$BUILD_DIR" ]] || die "BUILD_DIR not found: $BUILD_DIR"
+[[ -d "$SPACK_DIR" ]] || die "SPACK_DIR not found: $SPACK_DIR"
+[[ -f "$SPACK_ACTIVATE_SCRIPT" ]] || die "SPACK_ACTIVATE_SCRIPT not found: $SPACK_ACTIVATE_SCRIPT"
+
+SECONDS=0
+log "PBS ctest job started on $(hostname)"
+log "PBS_JOBID = ${PBS_JOBID:-manual}"
+log "BUILD_DIR = $BUILD_DIR"
+
+# shellcheck disable=SC1090
+source "$SPACK_ACTIVATE_SCRIPT"
+
+TODAY="$(date +%F)"
+LOG_DIR="$BUILD_DIR/logs/$TODAY"
+mkdir -p "$LOG_DIR"
+JOB_ID="${PBS_JOBID:-manual}"
+JOB_ID="${JOB_ID%%.*}"
+
+cd "$BUILD_DIR"
+THREADS="${PBS_NCPUS:-$(nproc)}"
+log "Running ctest with $THREADS parallel threads"
+ctest --output-on-failure -j"$THREADS" 2>&1 | tee "$LOG_DIR/ctest_${JOB_ID}.log"
+
+DUR=$SECONDS
+log "CTest finished successfully in $((DUR/60)) min $((DUR%60)) s"
+log "Log saved at: $LOG_DIR/ctest_${JOB_ID}.log"
