@@ -1,6 +1,6 @@
-# 🛍️ Sistema Automatizado de Compilacao e Testes do MPAS-JEDI
+# 🛍️ Sistema Automatizado de Compilacao e Testes do MONAN-bundle (MONAN+JEDI)
 
-Este repositório contém uma estrutura padronizada e automatizada para compilar e testar o sistema **MPAS-JEDI** nas maquinas o **INPE**, utilizando o Spack-Stack 1.7.0 e o SLURM como sistema de filas.
+Este repositório contém uma estrutura padronizada e automatizada para compilar e testar o sistema **MONAN-JEDI** nas maquinas o **INPE**, utilizando o Spack-Stack 1.7.0 e os sistema de filas.
 
 ---
 
@@ -40,7 +40,7 @@ Execute **somente** o script principal:
 **Argumentos**
 
 - `-v <VERSAO>` (opcional): Define a tag ou branch da release do `mpas-bundle` a ser utilizada.  
-  **Padrão:** `3.0.0`
+  **Padrão:** `3.0.2`
 
 - `-m <MODO>` (opcional): Modo de execução. Use `local` para rodar no nó de login ou `slurm` para submeter via SLURM.  
   **Padrão:** `local`
@@ -79,7 +79,7 @@ Este script irá:
 
 - Ter o ambiente Spack-Stack 1.7.0 configurado em:
   ```
-  /mnt/beegfs/das.group/spack-envs/mpas-bundle/start_spack_bundle.sh
+  <PATH>/mpas-bundle/start_spack_stack.sh
   ```
 
 - Módulos recomendados para carregar antes de iniciar:
@@ -158,8 +158,8 @@ Para ativar o modo desejado, utilize o script `submit_jobs.sh` com o último arg
 Exemplos:
 
 ```bash
-./submit_jobs.sh . build-3.0.0 /mnt/beegfs/das.group/spack-envs/mpas-bundle gnu ON slurm
-./submit_jobs.sh . build-3.0.0 /mnt/beegfs/das.group/spack-envs/mpas-bundle gnu ON local
+./submit_jobs.sh . build-3.0.2 /mnt/beegfs/das.group/spack-envs/mpas-bundle gnu ON slurm
+./submit_jobs.sh . build-3.0.2 /mnt/beegfs/das.group/spack-envs/mpas-bundle gnu ON local
 ```
 
 ---
