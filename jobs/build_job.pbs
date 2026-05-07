@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+###############################################################################
+# jobs/build_job.pbs
+#
+# PBS build job body for MONAN-bundle/MPAS-bundle.
+# PBS resources are passed by qsub options in lib/submit_jobs.sh so this file
+# remains reusable across PBS sites.
+###############################################################################
+
+set -Eeuo pipefail
+
+log() { printf '[%s] [INFO] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$*"; }
+die() { printf '[%s] [ERROR] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$*" >&2; exit 1; }
+trap 'log "Unexpected error at line $LINENO"; exit 2' ERR
+
+BUILD_DIR="${1:?BUILD_DIR missing}"
+SPACK_DIR="${2:?SPACK_DIR missing}"
+SPACK_ACTIVATE_SCRIPT="${3:?SPACK_ACTIVATE_SCRIPT missing}"
+COMPILER="${4:-gnu}"
+PRECISION="${5:-ON}"
+set --
+
+[[ -d "$BUILD_DIR" ]] || die "BUILD_DIR not found: $BUILD_DIR"
+[[ -d "$SPACK_DIR" ]] || die "SPACK_DIR not found: $SPACK_DIR"
+[[ -f "$SPACK_ACTIVATE_SCRIPT" ]] || die "SPACK_ACTIVATE_SCRIPT not found: $SPACK_ACTIVATE_SCRIPT"
+
+SECONDS=0
+log "PBS build job started on $(hostname)"
+log "PBS_JOBID    = ${PBS_JOBID:-manual}"
+log "BUILD_DIR    = $BUILD_DIR"
+log "SPACK_DIR    = $SPACK_DIR"
+log "COMPILER     = $COMPILER"
+log "PRECISION    = $PRECISION"
+
+# shellcheck disable=SC1090
+source "$SPACK_ACTIVATE_SCRIPT"
+
+TODAY="$(date +%F)"
+LOG_DIR="$BUILD_DIR/logs/$TODAY"
+mkdir -p "$LOG_DIR"
+JOB_ID="${PBS_JOBID:-manual}"
+JOB_ID="${JOB_ID%%.*}"
+
+cd "$BUILD_DIR"
+if [[ ! -f Makefile ]]; then
+  log "No Makefile found; running CMake reconfiguration"
+  cmake .. \
+    -DMPAS_DOUBLE_PRECISION="$PRECISION" \
+    -DMPAS_BUNDLE_NOREMOTE="${MPAS_BUNDLE_NOREMOTE:-ON}" \
+    -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-Release}" \
+    -DCMAKE_VERBOSE_MAKEFILE="${CMAKE_VERBOSE_MAKEFILE:-ON}" \
+    2>&1 | tee "$LOG_DIR/cmake_${JOB_ID}.log"
+else
+  log "Makefile present; skipping CMake"
+fi
+
+NUM_CORES="${PBS_NCPUS:-$(nproc)}"
+log "Compiling with make -j$NUM_CORES"
+make -j"$NUM_CORES" 2>&1 | tee "$LOG_DIR/make_${JOB_ID}.log"
+
+DUR=$SECONDS
+log "Compilation finished successfully in $((DUR/60)) min $((DUR%60)) s"
+log "Logs saved under: $LOG_DIR"
