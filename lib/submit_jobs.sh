@@ -23,7 +23,7 @@ Required
 Optional
   -c COMPILER         Toolchain label. Default: gnu
   -p ON|OFF           Precision flag. Default: ON
-  -m MODE             local or slurm. Default: slurm
+  -m MODE             local or queued. Default: queued
   -h                  Show help
 EOF
   exit 1
@@ -33,9 +33,107 @@ log() { printf '[%s] [INFO] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$*"; }
 die() { printf '[%s] [ERROR] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$*" >&2; exit 1; }
 trap 'log "Unexpected error at line $LINENO"; exit 2' ERR
 
+submit_pbs_jobs() {
+  command -v qsub >/dev/null 2>&1 || die "qsub not found; cannot use PBS queued mode."
+  [[ -f "$SCRIPT_DIR/jobs/build_job.pbs" ]] || die "Missing PBS build template: jobs/build_job.pbs"
+  [[ -f "$SCRIPT_DIR/jobs/ctest_job.pbs" ]] || die "Missing PBS ctest template: jobs/ctest_job.pbs"
+
+  local pbs_project_args=()
+  if [[ -n "${PBS_PROJECT:-}" ]]; then
+    pbs_project_args=(-A "$PBS_PROJECT")
+  fi
+
+  log "Submitting PBS build job"
+  BUILD_JOB_ID=$(qsub \
+    -N "${PBS_BUILD_JOB_NAME:-monan_build}" \
+    -q "${PBS_QUEUE:-workq}" \
+    -l "select=${PBS_BUILD_SELECT:-1:ncpus=64}" \
+    -l "walltime=${PBS_BUILD_WALLTIME:-02:00:00}" \
+    -o "$LOG_DIR/build_\$PBS_JOBID.out" \
+    -e "$LOG_DIR/build_\$PBS_JOBID.err" \
+    "${pbs_project_args[@]}" \
+    -- "$SCRIPT_DIR/jobs/build_job.pbs" \
+    "$BUILD_DIR" "$SPACK_DIR" "$SPACK_ACTIVATE_SCRIPT" "$COMPILER" "$PRECISION")
+
+  [[ -n "$BUILD_JOB_ID" ]] || die "qsub returned an empty build job id."
+  log "PBS build job id: $BUILD_JOB_ID"
+
+  log "Submitting PBS ctest job after successful build"
+  CTEST_JOB_ID=$(qsub \
+    -N "${PBS_CTEST_JOB_NAME:-monan_ctest}" \
+    -q "${PBS_QUEUE:-workq}" \
+    -l "select=${PBS_CTEST_SELECT:-1:ncpus=64}" \
+    -l "walltime=${PBS_CTEST_WALLTIME:-01:00:00}" \
+    -W "depend=afterok:$BUILD_JOB_ID" \
+    -o "$LOG_DIR/ctest_\$PBS_JOBID.out" \
+    -e "$LOG_DIR/ctest_\$PBS_JOBID.err" \
+    "${pbs_project_args[@]}" \
+    -- "$SCRIPT_DIR/jobs/ctest_job.pbs" \
+    "$BUILD_DIR" "$SPACK_DIR" "$SPACK_ACTIVATE_SCRIPT")
+
+  [[ -n "$CTEST_JOB_ID" ]] || die "qsub returned an empty ctest job id."
+  log "PBS ctest job id: $CTEST_JOB_ID; dependency: afterok:$BUILD_JOB_ID"
+  log "Track with: qstat $BUILD_JOB_ID $CTEST_JOB_ID"
+}
+
+submit_slurm_jobs() {
+  command -v sbatch >/dev/null 2>&1 || die "sbatch not found; cannot use SLURM queued mode."
+  [[ -f "$SCRIPT_DIR/jobs/build_job.slurm" ]] || die "Missing SLURM build template: jobs/build_job.slurm"
+  [[ -f "$SCRIPT_DIR/jobs/ctest_job.slurm" ]] || die "Missing SLURM ctest template: jobs/ctest_job.slurm"
+
+  SBATCH_COMMON=(--partition="${SLURM_PARTITION:-PESQ1}")
+
+  log "Submitting SLURM build job"
+  BUILD_SBATCH_ARGS=(
+    --parsable
+    --job-name="${SLURM_BUILD_JOB_NAME:-monan_build}"
+    --nodes="${SLURM_BUILD_NODES:-1}"
+    --time="${SLURM_BUILD_TIME:-02:00:00}"
+    --output="$LOG_DIR/build_%j.out"
+    --error="$LOG_DIR/build_%j.err"
+  )
+
+  if [[ "${SLURM_BUILD_EXCLUSIVE:-0}" == "1" ]]; then
+    BUILD_SBATCH_ARGS+=(--exclusive)
+  fi
+
+  BUILD_JOB_ID=$(sbatch "${SBATCH_COMMON[@]}" "${BUILD_SBATCH_ARGS[@]}" \
+    "$SCRIPT_DIR/jobs/build_job.slurm" \
+    "$BUILD_DIR" "$SPACK_DIR" "$SPACK_ACTIVATE_SCRIPT" "$COMPILER" "$PRECISION")
+
+  [[ -n "$BUILD_JOB_ID" ]] || die "sbatch returned an empty build job id."
+  log "SLURM build job id: $BUILD_JOB_ID"
+
+  if command -v sacct >/dev/null 2>&1; then
+    sleep 3
+    STATE=$(sacct -j "$BUILD_JOB_ID" --format=State%20 --noheader | head -n1 | awk '{print $1}')
+    if [[ "$STATE" == FAILED* || "$STATE" == CANCELLED* ]]; then
+      die "Build job already $STATE"
+    fi
+  else
+    log "sacct not found; skipping immediate job-state check."
+  fi
+
+  log "Submitting SLURM ctest job after successful build"
+  CTEST_JOB_ID=$(sbatch "${SBATCH_COMMON[@]}" \
+    --dependency="afterok:$BUILD_JOB_ID" \
+    --job-name="${SLURM_CTEST_JOB_NAME:-monan_ctest}" \
+    --nodes="${SLURM_CTEST_NODES:-1}" \
+    --ntasks="${SLURM_CTEST_NTASKS:-32}" \
+    --time="${SLURM_CTEST_TIME:-01:00:00}" \
+    --output="$LOG_DIR/ctest_%j.out" \
+    --error="$LOG_DIR/ctest_%j.err" \
+    "$SCRIPT_DIR/jobs/ctest_job.slurm" \
+    "$BUILD_DIR" "$SPACK_DIR" "$SPACK_ACTIVATE_SCRIPT")
+
+  [[ -n "$CTEST_JOB_ID" ]] || die "Failed to submit ctest job."
+  log "SLURM ctest job id: $CTEST_JOB_ID; dependency: afterok:$BUILD_JOB_ID"
+  log "Track with: squeue -j $BUILD_JOB_ID,$CTEST_JOB_ID"
+}
+
 COMPILER="${COMPILER_LABEL:-gnu}"
 PRECISION="ON"
-MODE="slurm"
+MODE="queued"
 
 while getopts ":s:b:e:a:c:p:m:h" opt; do
   case "$opt" in
@@ -58,8 +156,8 @@ set --
 [[ -f "$SPACK_ACTIVATE_SCRIPT" ]] || die "SPACK_ACTIVATE_SCRIPT not found: $SPACK_ACTIVATE_SCRIPT"
 
 case "$MODE" in
-  local|slurm) : ;;
-  *) die "Invalid mode: $MODE. Use local or slurm." ;;
+  local|queued|pbs|slurm) : ;;
+  *) die "Invalid mode: $MODE. Use local, queued, pbs or slurm." ;;
 esac
 
 TODAY="$(date +%F)"
@@ -79,56 +177,12 @@ if [[ "$MODE" == "local" ]]; then
   exit 0
 fi
 
-command -v sbatch >/dev/null 2>&1 || die "sbatch not found; cannot use slurm mode."
-[[ -d "$SCRIPT_DIR/jobs" ]] || die "jobs/ directory missing in $SCRIPT_DIR"
-
-SBATCH_COMMON=(
-  --partition="${SLURM_PARTITION:-PESQ1}"
-)
-
-log "Submitting SLURM build job"
-BUILD_SBATCH_ARGS=(
-  --parsable
-  --job-name="${SLURM_BUILD_JOB_NAME:-monan_build}"
-  --nodes="${SLURM_BUILD_NODES:-1}"
-  --time="${SLURM_BUILD_TIME:-02:00:00}"
-  --output="$LOG_DIR/build_%j.out"
-  --error="$LOG_DIR/build_%j.err"
-)
-
-if [[ "${SLURM_BUILD_EXCLUSIVE:-0}" == "1" ]]; then
-  BUILD_SBATCH_ARGS+=(--exclusive)
+if [[ "$MODE" == "queued" ]]; then
+  MODE="${SCHEDULER:-slurm}"
 fi
 
-BUILD_JOB_ID=$(sbatch "${SBATCH_COMMON[@]}" "${BUILD_SBATCH_ARGS[@]}" \
-  "$SCRIPT_DIR/jobs/build_job.slurm" \
-  "$BUILD_DIR" "$SPACK_DIR" "$SPACK_ACTIVATE_SCRIPT" "$COMPILER" "$PRECISION")
-
-[[ -n "$BUILD_JOB_ID" ]] || die "sbatch returned an empty build job id."
-log "Build job id: $BUILD_JOB_ID"
-
-if command -v sacct >/dev/null 2>&1; then
-  sleep 3
-  STATE=$(sacct -j "$BUILD_JOB_ID" --format=State%20 --noheader | head -n1 | awk '{print $1}')
-  if [[ "$STATE" == FAILED* || "$STATE" == CANCELLED* ]]; then
-    die "Build job already $STATE"
-  fi
-else
-  log "sacct not found; skipping immediate job-state check."
-fi
-
-log "Submitting SLURM ctest job after successful build"
-CTEST_JOB_ID=$(sbatch "${SBATCH_COMMON[@]}" \
-  --dependency="afterok:$BUILD_JOB_ID" \
-  --job-name="${SLURM_CTEST_JOB_NAME:-monan_ctest}" \
-  --nodes="${SLURM_CTEST_NODES:-1}" \
-  --ntasks="${SLURM_CTEST_NTASKS:-32}" \
-  --time="${SLURM_CTEST_TIME:-01:00:00}" \
-  --output="$LOG_DIR/ctest_%j.out" \
-  --error="$LOG_DIR/ctest_%j.err" \
-  "$SCRIPT_DIR/jobs/ctest_job.slurm" \
-  "$BUILD_DIR" "$SPACK_DIR" "$SPACK_ACTIVATE_SCRIPT")
-
-[[ -n "$CTEST_JOB_ID" ]] || die "Failed to submit ctest job."
-log "CTest job id: $CTEST_JOB_ID; dependency: afterok:$BUILD_JOB_ID"
-log "Track with: squeue -j $BUILD_JOB_ID,$CTEST_JOB_ID"
+case "$MODE" in
+  pbs) submit_pbs_jobs ;;
+  slurm) submit_slurm_jobs ;;
+  *) die "Queued mode is not supported for scheduler: $MODE" ;;
+esac
