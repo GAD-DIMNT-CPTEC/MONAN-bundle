@@ -48,6 +48,13 @@ load_site_config() {
 
   export REPO_ROOT SCRIPT_DIR SITE_ID SCHEDULER DEFAULT_MODE COMPILER_LABEL BUILD_ROOT
   export SPACK_STACK_ROOT SPACK_ACTIVATE_SCRIPT CMAKE_BUILD_TYPE MPAS_BUNDLE_NOREMOTE CMAKE_VERBOSE_MAKEFILE
+
+  # Export optional scheduler settings when present.
+  export PBS_QUEUE PBS_PROJECT PBS_BUILD_JOB_NAME PBS_CTEST_JOB_NAME
+  export PBS_BUILD_SELECT PBS_CTEST_SELECT PBS_BUILD_WALLTIME PBS_CTEST_WALLTIME
+  export SLURM_PARTITION SLURM_BUILD_JOB_NAME SLURM_CTEST_JOB_NAME
+  export SLURM_BUILD_NODES SLURM_CTEST_NODES SLURM_CTEST_NTASKS
+  export SLURM_BUILD_TIME SLURM_CTEST_TIME SLURM_BUILD_EXCLUSIVE
 }
 
 validate_site_config() {
@@ -64,9 +71,10 @@ validate_site_config() {
   fi
 
   case "$SCHEDULER" in
+    pbs) command -v qsub >/dev/null 2>&1 || site_log "qsub not found now; local mode can still be used." ;;
     slurm) command -v sbatch >/dev/null 2>&1 || site_log "sbatch not found now; local mode can still be used." ;;
     none) : ;;
-    *) site_die "Unsupported scheduler: $SCHEDULER" ;;
+    *) site_die "Unsupported scheduler: $SCHEDULER. Use pbs, slurm or none." ;;
   esac
 }
 
