@@ -1,151 +1,134 @@
 #!/usr/bin/env bash
 ###############################################################################
-# submit_jobs.sh
+# lib/submit_jobs.sh
 #
-# Unified launcher for **MPAS‑JEDI** build & test workflows on Egeon
-# -----------------------------------------------------------------------------
-# Maintainer : João Gerd Zell de Mattos <joao.gerd@inpe.br>
-# Created    : 2025‑04‑?? (original version)
-# Last update: 2025-04-24
-#
-# PURPOSE
-# =======
-# Build the mpas‑bundle, then run its ctest suite.
-# Works in two modes:
-#   • **slurm** (default) – submit build & test as separate SLURM jobs.
-#   • **local**           – compile on the login node (lib/build_local.sh) and
-#                           run `ctest` in‑place.
-#
-# USAGE
-# -----
-#   submit_jobs.sh -s <SCRIPT_DIR> -b <BUILD_DIR> -e <SPACK_DIR> \
-#                  [-c <compiler>] [-p <ON|OFF>] [-m <slurm|local>] [-h]
-#
-# Required
-#   -s SCRIPT_DIR   Directory containing this helper and subdirs (jobs/, lib/)
-#   -b BUILD_DIR    Build directory prepared by build_and_test.sh
-#   -e SPACK_DIR    Root of the activated Spack-Stack environment
-#
-# Optional
-#   -c COMPILER     Toolchain label (default: gnu)
-#   -p PRECISION    "ON" (double) | "OFF" (single); default: ON
-#   -m MODE         "slurm" or "local" (default: slurm)
-#   -h              Show this help and exit
-#
-# REQUIREMENTS
-# ------------
-# * SLURM ≥ 20.11 with sacct for queue inspection (slurm mode)
-# * jobs/build_job.slurm & jobs/ctest_job.slurm present (slurm mode)
-# * lib/build_local.sh present & executable (local mode)
-#
-# CHANGELOG
-# ---------
-# 2025‑04‑24 – switched to getopts parsing and added detailed usage().
-# 2025‑04‑24 – local mode now runs ctest automatically after build.
-# 2025‑04‑23 – initial dual‑mode implementation with robust validation.
-#
-# EXIT CODES
-# ----------
-#  0  success
-#  1  missing dependencies or user error
-#  2  unexpected runtime failure
+# Unified launcher for MONAN-bundle build and test workflows.
+# Scheduler-specific defaults are read from the active site configuration via
+# environment variables exported by build_and_test.sh.
 ###############################################################################
 
 set -Eeuo pipefail
 
-# ------------ helper ---------------------------------------------------------
 usage() {
-  awk '
-    /^# USAGE/ { in_block=1 }
-    /^# REQUIREMENTS/ { exit }
-    in_block && /^#/ { sub(/^# ?/, ""); print }
-  ' "$0"
+  cat <<'EOF'
+USAGE
+  submit_jobs.sh -s <SCRIPT_DIR> -b <BUILD_DIR> -e <SPACK_DIR> -a <ACTIVATE_SCRIPT> [options]
+
+Required
+  -s SCRIPT_DIR       Repository/script root
+  -b BUILD_DIR        CMake build directory
+  -e SPACK_DIR        Shared Spack-Stack root
+  -a ACTIVATE_SCRIPT  Spack-Stack activation script
+
+Optional
+  -c COMPILER         Toolchain label. Default: gnu
+  -p ON|OFF           Precision flag. Default: ON
+  -m MODE             local or slurm. Default: slurm
+  -h                  Show help
+EOF
   exit 1
 }
 
-log() { printf '[%s] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$*"; }
-die() { printf '[%(%F %T)T] [ERROR] %s\n' -1 "$*" >&2; exit 1; }
-trap 'log "[ERROR] line $LINENO – exiting."; exit 2' ERR
+log() { printf '[%s] [INFO] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$*"; }
+die() { printf '[%s] [ERROR] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$*" >&2; exit 1; }
+trap 'log "Unexpected error at line $LINENO"; exit 2' ERR
 
-# ------------ defaults -------------------------------------------------------
-COMPILER=gnu
-PRECISION=ON
-MODE=slurm
+COMPILER="${COMPILER_LABEL:-gnu}"
+PRECISION="ON"
+MODE="slurm"
 
-# ------------ getopts parsing ------------------------------------------------
-while getopts ":s:b:e:c:p:m:h" opt; do
+while getopts ":s:b:e:a:c:p:m:h" opt; do
   case "$opt" in
     s) SCRIPT_DIR="$OPTARG" ;;
-    b) BUILD_DIR="$OPTARG"  ;;
-    e) SPACK_DIR="$OPTARG"  ;;
-    c) COMPILER="$OPTARG"   ;;
-    p) PRECISION="$OPTARG"  ;;
-    m) MODE="$OPTARG"       ;;
+    b) BUILD_DIR="$OPTARG" ;;
+    e) SPACK_DIR="$OPTARG" ;;
+    a) SPACK_ACTIVATE_SCRIPT="$OPTARG" ;;
+    c) COMPILER="$OPTARG" ;;
+    p) PRECISION="$OPTARG" ;;
+    m) MODE="$OPTARG" ;;
     h|*) usage ;;
   esac
 done
-
-# Prevent accidental propagation of this script's positional parameters.
 set --
 
-# ------------ required argument checks ----------------------------------------
-[[ -z "${SCRIPT_DIR:-}" || -z "${BUILD_DIR:-}" || -z "${SPACK_DIR:-}" ]] && usage
+[[ -z "${SCRIPT_DIR:-}" || -z "${BUILD_DIR:-}" || -z "${SPACK_DIR:-}" || -z "${SPACK_ACTIVATE_SCRIPT:-}" ]] && usage
+[[ -d "$SCRIPT_DIR" ]] || die "SCRIPT_DIR not found: $SCRIPT_DIR"
+[[ -d "$BUILD_DIR" ]] || die "BUILD_DIR not found: $BUILD_DIR"
+[[ -d "$SPACK_DIR" ]] || die "SPACK_DIR not found: $SPACK_DIR"
+[[ -f "$SPACK_ACTIVATE_SCRIPT" ]] || die "SPACK_ACTIVATE_SCRIPT not found: $SPACK_ACTIVATE_SCRIPT"
 
 case "$MODE" in
-  slurm|local) : ;;
-  *) die "Invalid MODE '$MODE'. Use slurm or local." ;;
+  local|slurm) : ;;
+  *) die "Invalid mode: $MODE. Use local or slurm." ;;
 esac
 
-[[ -d "$SCRIPT_DIR" ]] || die "SCRIPT_DIR not found: $SCRIPT_DIR"
-[[ -d "$BUILD_DIR" ]]  || die "BUILD_DIR not found:  $BUILD_DIR"
-[[ -d "$SPACK_DIR" ]]  || die "SPACK_DIR not found:  $SPACK_DIR"
+TODAY="$(date +%F)"
+LOG_DIR="$BUILD_DIR/logs/$TODAY"
+mkdir -p "$LOG_DIR"
 
-# ------------ LOCAL MODE -----------------------------------------------------
 if [[ "$MODE" == "local" ]]; then
   [[ -x "$SCRIPT_DIR/lib/build_local.sh" ]] || die "build_local.sh not executable."
-  log "[INFO] Building via build_local.sh …"
-  $SCRIPT_DIR/lib/build_local.sh "$BUILD_DIR" "$SPACK_DIR" "$COMPILER" "$PRECISION"
-  log "[INFO] Build done. Running ctest …"
+  log "Running local build"
+  "$SCRIPT_DIR/lib/build_local.sh" "$BUILD_DIR" "$SPACK_DIR" "$SPACK_ACTIVATE_SCRIPT" "$COMPILER" "$PRECISION"
+  log "Running local ctest"
   (
     cd "$BUILD_DIR"
-    ctest --output-on-failure 2>&1 | tee "$BUILD_DIR/ctest_local.log"
+    ctest --output-on-failure 2>&1 | tee "$LOG_DIR/ctest_local.log"
   )
-  log "[INFO] ctest finished. Log: $BUILD_DIR/ctest_local.log"
+  log "Local ctest log: $LOG_DIR/ctest_local.log"
   exit 0
 fi
 
-# ------------ SLURM MODE -----------------------------------------------------
+command -v sbatch >/dev/null 2>&1 || die "sbatch not found; cannot use slurm mode."
 [[ -d "$SCRIPT_DIR/jobs" ]] || die "jobs/ directory missing in $SCRIPT_DIR"
 
-# Logs directory inside build tree
-TODAY=$(date +%F)
-LOG_DIR="$BUILD_DIR/logs/$TODAY"
-mkdir -p "$LOG_DIR" || true
+SBATCH_COMMON=(
+  --partition="${SLURM_PARTITION:-PESQ1}"
+)
 
-# SLURM output and error logs will go to $BUILD_DIR/logs/$TODAY
-log "[SLURM] Submitting build_job.slurm …"
-BUILD_JOB_ID=$(sbatch --parsable \
-                      --output="$LOG_DIR/build_%j.out" \
-                      --error="$LOG_DIR/build_%j.err" \
-                      "$SCRIPT_DIR/jobs/build_job.slurm" \
-                      "$BUILD_DIR" "$SPACK_DIR" "$COMPILER" "$PRECISION")
-                            
-[[ -n "$BUILD_JOB_ID" ]] || die "sbatch returned empty job ID."
-log "[SLURM] BUILD job id = $BUILD_JOB_ID"
+log "Submitting SLURM build job"
+BUILD_SBATCH_ARGS=(
+  --parsable
+  --job-name="${SLURM_BUILD_JOB_NAME:-monan_build}"
+  --nodes="${SLURM_BUILD_NODES:-1}"
+  --time="${SLURM_BUILD_TIME:-02:00:00}"
+  --output="$LOG_DIR/build_%j.out"
+  --error="$LOG_DIR/build_%j.err"
+)
 
-sleep 3
-STATE=$(sacct -j "$BUILD_JOB_ID" --format=State%20 --noheader | head -n1 | awk '{print $1}')
-[[ -z "$STATE" ]] && die "BUILD job $BUILD_JOB_ID not visible via sacct."
-[[ "$STATE" == FAILED* || "$STATE" == CANCELLED* ]] && die "BUILD job already $STATE"
+if [[ "${SLURM_BUILD_EXCLUSIVE:-0}" == "1" ]]; then
+  BUILD_SBATCH_ARGS+=(--exclusive)
+fi
 
-# SLURM output and error logs will go to $BUILD_DIR/logs/$TODAY
-log "[SLURM] Submitting ctest_job.slurm (afterok:$BUILD_JOB_ID) …"
-CTEST_JOB_ID=$(sbatch --dependency=afterok:$BUILD_JOB_ID \
-                      --output="$LOG_DIR/ctest_%j.out" \
-                      --error="$LOG_DIR/ctest_%j.err" \
-                      "$SCRIPT_DIR/jobs/ctest_job.slurm" "$BUILD_DIR" "$SPACK_DIR")
-                      
+BUILD_JOB_ID=$(sbatch "${SBATCH_COMMON[@]}" "${BUILD_SBATCH_ARGS[@]}" \
+  "$SCRIPT_DIR/jobs/build_job.slurm" \
+  "$BUILD_DIR" "$SPACK_DIR" "$SPACK_ACTIVATE_SCRIPT" "$COMPILER" "$PRECISION")
+
+[[ -n "$BUILD_JOB_ID" ]] || die "sbatch returned an empty build job id."
+log "Build job id: $BUILD_JOB_ID"
+
+if command -v sacct >/dev/null 2>&1; then
+  sleep 3
+  STATE=$(sacct -j "$BUILD_JOB_ID" --format=State%20 --noheader | head -n1 | awk '{print $1}')
+  if [[ "$STATE" == FAILED* || "$STATE" == CANCELLED* ]]; then
+    die "Build job already $STATE"
+  fi
+else
+  log "sacct not found; skipping immediate job-state check."
+fi
+
+log "Submitting SLURM ctest job after successful build"
+CTEST_JOB_ID=$(sbatch "${SBATCH_COMMON[@]}" \
+  --dependency="afterok:$BUILD_JOB_ID" \
+  --job-name="${SLURM_CTEST_JOB_NAME:-monan_ctest}" \
+  --nodes="${SLURM_CTEST_NODES:-1}" \
+  --ntasks="${SLURM_CTEST_NTASKS:-32}" \
+  --time="${SLURM_CTEST_TIME:-01:00:00}" \
+  --output="$LOG_DIR/ctest_%j.out" \
+  --error="$LOG_DIR/ctest_%j.err" \
+  "$SCRIPT_DIR/jobs/ctest_job.slurm" \
+  "$BUILD_DIR" "$SPACK_DIR" "$SPACK_ACTIVATE_SCRIPT")
+
 [[ -n "$CTEST_JOB_ID" ]] || die "Failed to submit ctest job."
-log "[SLURM] CTEST job id = $CTEST_JOB_ID (depends on build)"
-log "[SLURM] Track jobs with: squeue -j $BUILD_JOB_ID,$CTEST_JOB_ID"
-
+log "CTest job id: $CTEST_JOB_ID; dependency: afterok:$BUILD_JOB_ID"
+log "Track with: squeue -j $BUILD_JOB_ID,$CTEST_JOB_ID"
